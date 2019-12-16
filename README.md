@@ -11,12 +11,11 @@ A [Jupyter Notebooks ContentsManager](https://jupyter-notebook.readthedocs.io/en
 ```
 c.NotebookApp.contents_manager_class = 'jupyter_omero_contents.OmeroContentsManager'
 c.ContentsManager.checkpoints_class = 'notebook.services.contents.filecheckpoints.GenericFileCheckpoints'
-```
-You must export these two environment variables before running jupyter-notebook.
-```
-export OMERO_HOST=omero.example.org
-export OMERO_SESSION=omero-session-uuid
-jupyter-notebook
+c.OmeroContentsManager.omero_host = 'omero.example.org'
+# Either provide a session, or username and password
+c.OmeroContentsManager.omero_session = 'session-id'
+c.OmeroContentsManager.omero_user = 'username'
+c.OmeroContentsManager.omero_password = 'password'
 ```
 If you need an OMERO session:
 ```

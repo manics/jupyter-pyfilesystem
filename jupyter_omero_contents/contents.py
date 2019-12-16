@@ -1,4 +1,5 @@
 from notebook.services.contents.manager import ContentsManager
+from traitlets import Unicode
 from tornado.web import HTTPError
 from base64 import (
     b64encode,
@@ -12,7 +13,6 @@ import os
 import omero.clients
 from omero.gateway import BlitzGateway
 from omero.rtypes import (
-    rlong,
     rstring,
     unwrap,
 )
@@ -56,12 +56,46 @@ class OmeroContentsManager(ContentsManager):
     https://github.com/jupyter/notebook/blob/b8b66332e2023e83d2ee04f83d8814f567e01a4e/notebook/services/contents/filecheckpoints.py
     """
 
+    omero_host = Unicode(
+        os.getenv('OMERO_HOST', ''),
+        help='OMERO host or URL connection',
+        config=True,
+    )
+
+    omero_user = Unicode(
+        os.getenv('OMERO_USER'),
+        allow_none=True,
+        help='OMERO session ID',
+        config=True,
+    )
+
+    omero_password = Unicode(
+        os.getenv('OMERO_PASSWORD'),
+        allow_none=True,
+        help='OMERO session ID',
+        config=True,
+    )
+
+    omero_session = Unicode(
+        os.getenv('OMERO_SESSION'),
+        allow_none=True,
+        help='OMERO session ID',
+        config=True,
+    )
+
     def __init__(self, *args, **kwargs):
         super(OmeroContentsManager, self).__init__(*args, **kwargs)
-        self.client = omero.client(os.getenv('OMERO_HOST'))
-        session = self.client.joinSession(os.getenv('OMERO_SESSION'))
-        session.detachOnDestroy()
-        self.client.enableKeepAlive(60)
+        self.client = omero.client(self.omero_host)
+        if self.omero_session:
+            session = self.client.joinSession(self.omero_session)
+            session.detachOnDestroy()
+            self.log.info('Logged in to %s with existing session',
+                          self.omero_host)
+        else:
+            session = self.client.createSession(
+                self.omero_user, self.omero_password)
+            self.log.info('Logged in to %s with new session', self.omero_host)
+        # self.client.enableKeepAlive(60)
         self.conn = BlitzGateway(client_obj=self.client)
 
     # https://github.com/quantopian/pgcontents/blob/5fad3f6840d82e6acde97f8e3abe835765fa824b/pgcontents/pgmanager.py#L115
