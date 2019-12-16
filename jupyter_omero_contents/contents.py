@@ -177,17 +177,13 @@ class OmeroContentsManager(ContentsManager):
         return self._file_model(f, content, format)
 
     def _file_model(self, f, content, format):
-        # TODO: AttributeError: 'str' object has no attribute 'decode'
-        # model = _base_model(f.getPath(), f.getName())
-        model = _base_model(unwrap(f._obj.path), f.getName())
+        model = _base_model(f.getPath(), f.getName())
         model['type'] = 'file'
         model['last_modified'] = model['created'] = f.getDate()
         model['size'] = f.getSize()
         if content:
             model['content'], model['format'] = self._read_file(f, format)
-            # AttributeError: 'str' object has no attribute 'decode'
-            # model['mimetype'] = f.getMimetype()
-            model['mimetype'] = unwrap(f._obj.mimetype)
+            model['mimetype'] = f.getMimetype()
             if not model['mimetype']:
                 model['mimetype'] = mimetypes.guess_type(model['path'])[0]
         return model
@@ -226,7 +222,7 @@ class OmeroContentsManager(ContentsManager):
                         400,
                         "{}/{} is not UTF-8 encoded".format(f.path, f.name),
                         reason='bad format')
-        return b64encode(bcontent), 'base64'
+        return b64encode(bcontent).decode('ascii'), 'base64'
 
     def save(self, model, path):
         self.log.debug('save: %s', path)
