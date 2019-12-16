@@ -311,15 +311,17 @@ class OmeroContentsManager(ContentsManager):
         dirname, name = new_path.rsplit('/', 1)
         if dirname != '/jupyter' or old_path.rsplit('/', 1)[0] != '/jupyter':
             raise HTTPError(400, 'Directory must be /jupyter')
-        try:
-            self._get_omero_file(new_path)
+        if self.file_exists(new_path):
             raise HTTPError(
                 400, 'File {} exists, please delete first'.format(new_path))
-        except HTTPError:
-            f = self._get_omero_file(old_path)._obj
-            f.setName(rstring(name))
-            updatesrv = self.conn.getUpdateService()
-            f = updatesrv.saveAndReturnObject(f)
+        f = self._get_omero_file(old_path)._obj
+        f.setName(rstring(name))
+        updatesrv = self.conn.getUpdateService()
+        f = updatesrv.saveAndReturnObject(f)
+        # TODO:
+        # This causes an error in super().rename() due to checkpoints not being
+        # implemented:
+        # self.checkpoints.rename_all_checkpoints(old_path, new_path)
 
     def file_exists(self, path):
         self.log.debug('file_exists: %s', path)
