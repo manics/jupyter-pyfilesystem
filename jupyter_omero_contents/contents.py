@@ -131,7 +131,7 @@ class OmeroManagerMixin(HasTraits):
             return 'file'
 
     def get(self, path, content=True, type=None, format=None):
-        self.log.debug('get: %s', path)
+        self.log.debug('get(%s)', path)
         path = _normalise_path(path)
         if type is None:
             type = self.guess_type(path)
@@ -241,7 +241,7 @@ class OmeroManagerMixin(HasTraits):
         return b64encode(bcontent).decode('ascii'), 'base64'
 
     def save(self, model, path):
-        self.log.debug('save: %s', path)
+        self.log.debug('save(%s)', path)
         self.run_pre_save_hook(model=model, path=path)
         path = _normalise_path(path)
         if 'type' not in model or not model['type']:
@@ -317,13 +317,13 @@ class OmeroManagerMixin(HasTraits):
         return h.hexdigest()
 
     def delete_file(self, path):
-        self.log.debug('delete_file: %s', path)
+        self.log.debug('delete_file(%s)', path)
         path = _normalise_path(path)
         f = self._get_omero_file(path)
         self.conn.deleteObject(f._obj)
 
     def rename_file(self, old_path, new_path):
-        self.log.debug('rename_file: %s %s', old_path, new_path)
+        self.log.debug('rename_file(%s %s)', old_path, new_path)
         old_path = _normalise_path(old_path)
         new_path = _normalise_path(new_path)
         dirname, name = new_path.rsplit('/', 1)
@@ -342,7 +342,7 @@ class OmeroManagerMixin(HasTraits):
         # self.checkpoints.rename_all_checkpoints(old_path, new_path)
 
     def file_exists(self, path):
-        self.log.debug('file_exists: %s', path)
+        self.log.debug('file_exists(%s)', path)
         path = _normalise_path(path)
         try:
             return self._get_omero_file(path)
@@ -350,12 +350,12 @@ class OmeroManagerMixin(HasTraits):
             return False
 
     def dir_exists(self, path):
-        self.log.debug('dir_exists: %s', path)
+        self.log.debug('dir_exists(%s)', path)
         path = _normalise_path(path)
         return path == '/' or path.strip('/') == 'jupyter'
 
     def is_hidden(self, path):
-        self.log.debug('is_hidden: %s', path)
+        self.log.debug('is_hidden(%s)', path)
         path = _normalise_path(path)
         return path.rsplit('/', 1)[-1].startswith('.')
 
@@ -377,16 +377,15 @@ class OmeroCheckpoints(
         with a checkpoint id.""",
     )
 
-    def checkpoint_path(self, checkpoint_id, path):
+    def _checkpoint_path(self, checkpoint_id, path):
         """find the path to a checkpoint"""
         path = _normalise_path(path)
         parent, name = path.rsplit('/', 1)
         prefix = self.checkpoint_prefix.format(id=checkpoint_id)
         cp_path = u"{}/{}{}".format(parent, prefix, name)
-        self.log.error('checkpoint_path %s', cp_path)
         return cp_path
 
-    def checkpoint_model(self, checkpoint_id, f):
+    def _checkpoint_model(self, checkpoint_id, f):
         """construct the info dict for a given checkpoint"""
         info = {'id': str(checkpoint_id)}
         if isinstance(f, dict):
@@ -396,53 +395,52 @@ class OmeroCheckpoints(
         return info
 
     def create_file_checkpoint(self, content, format, path):
-        self.log.error(
-            'create_file_checkpoint %s %s %s', content, format, path)
-        cp_path = self.checkpoint_path(0, path)
+        self.log.debug('create_file_checkpoint(%s)', path)
+        cp_path = self._checkpoint_path(0, path)
         model = _base_model(*cp_path.rsplit('/', 1))
         model['content'] = content
         model['format'] = format
         f = self._save_file(cp_path, model)
-        return self.checkpoint_model(0, f)
+        return self._checkpoint_model(0, f)
 
     def create_notebook_checkpoint(self, nb, path):
-        self.log.error('create_notebook_checkpoint %s %s', nb, path)
-        cp_path = self.checkpoint_path(0, path)
+        self.log.debug('create_notebook_checkpoint(%s)', path)
+        cp_path = self._checkpoint_path(0, path)
         model = _base_model(*cp_path.rsplit('/', 1))
         model['content'] = nb
         f = self._save_notebook(model, cp_path, False)
-        return self.checkpoint_model(0, f)
+        return self._checkpoint_model(0, f)
 
     def get_file_checkpoint(self, checkpoint_id, path):
-        self.log.error('get_file_checkpoint %s %s', checkpoint_id, path)
         # -> {'type': 'file', 'content': <str>, 'format': {'text', 'base64'}}
-        cp_path = self.checkpoint_path(checkpoint_id, path)
+        self.log.debug('get_file_checkpoint(%s %s)', checkpoint_id, path)
+        cp_path = self._checkpoint_path(checkpoint_id, path)
         return self._get_file(cp_path, True, None)
 
     def get_notebook_checkpoint(self, checkpoint_id, path):
-        self.log.error('get_notebook_checkpoint %s %s', checkpoint_id, path)
         # -> {'type': 'notebook', 'content': <output of nbformat.read>}
-        cp_path = self.checkpoint_path(checkpoint_id, path)
+        self.log.debug('get_notebook_checkpoint(%s %s)', checkpoint_id, path)
+        cp_path = self._checkpoint_path(checkpoint_id, path)
         return self._get_notebook(cp_path, True, 'text', False)
 
     def delete_checkpoint(self, checkpoint_id, path):
-        self.log.error('delete_checkpoint %s %s', checkpoint_id, path)
-        cp_path = self.checkpoint_path(checkpoint_id, path)
+        self.log.debug('delete_checkpoint(%s %s)', checkpoint_id, path)
+        cp_path = self._checkpoint_path(checkpoint_id, path)
         self.delete_file(cp_path)
 
     def list_checkpoints(self, path):
-        self.log.error('list_checkpoints %s', path)
-        cp_path = self.checkpoint_path(0, path)
+        self.log.debug('list_checkpoints(%s)', path)
+        cp_path = self._checkpoint_path(0, path)
         f = self.file_exists(cp_path)
         if f:
-            return [self.checkpoint_model(0, f)]
+            return [self._checkpoint_model(0, f)]
         return []
 
     def rename_checkpoint(self, checkpoint_id, old_path, new_path):
-        self.log.error(
-            'rename_checkpoint %s %s %s', checkpoint_id, old_path, new_path)
-        cp_path_old = self.checkpoint_path(checkpoint_id, old_path)
-        cp_path_new = self.checkpoint_path(checkpoint_id, new_path)
+        self.log.debug(
+            'rename_checkpoint(%s %s %s)', checkpoint_id, old_path, new_path)
+        cp_path_old = self._checkpoint_path(checkpoint_id, old_path)
+        cp_path_new = self._checkpoint_path(checkpoint_id, new_path)
         self.rename_file(cp_path_old, cp_path_new)
 
     # # Error Handling
