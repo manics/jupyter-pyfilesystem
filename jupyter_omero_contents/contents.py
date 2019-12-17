@@ -19,10 +19,13 @@ from hashlib import sha1
 import mimetypes
 import nbformat
 import os
+from time import time
+
 import omero.clients
 from omero.gateway import BlitzGateway
 from omero.rtypes import (
     rstring,
+    rtime,
     unwrap,
 )
 
@@ -110,6 +113,9 @@ class OmeroManagerMixin(HasTraits):
             self.log.info('Logged in to %s with new session', self.omero_host)
         return BlitzGateway(client_obj=client)
 
+    def _get_mtime(self, f):
+        return datetime.utcfromtimestamp(f.getMtime()/1000)
+
     # https://github.com/quantopian/pgcontents/blob/5fad3f6840d82e6acde97f8e3abe835765fa824b/pgcontents/pgmanager.py#L115
     def guess_type(self, path, allow_directory=True):
         """
@@ -139,15 +145,17 @@ class OmeroManagerMixin(HasTraits):
             raise ValueError("Unknown type passed: '{}'".format(type))
         return fn(path=path, content=content, format=format)
 
-    def _get_notebook(self, path, content, format):
+    def _get_notebook(self, path, content, format, trust=True):
         model = self._get_file(path, content, format)
         model['type'] = 'notebook'
         if content:
             nb = nbformat.reads(model['content'], as_version=4)
-            self.mark_trusted_cells(nb, path)
+            if trust:
+                self.mark_trusted_cells(nb, path)
             model['content'] = nb
             model['format'] = 'json'
-            self.validate_notebook_model(model)
+            if trust:
+                self.validate_notebook_model(model)
         return model
 
     def _get_directory(self, path, content, format):
@@ -191,7 +199,7 @@ class OmeroManagerMixin(HasTraits):
     def _file_model(self, f, content, format):
         model = _base_model(f.getPath(), f.getName())
         model['type'] = 'file'
-        model['last_modified'] = model['created'] = f.getDate()
+        model['last_modified'] = model['created'] = self._get_mtime(f)
         model['size'] = f.getSize()
         if content:
             model['content'], model['format'] = self._read_file(f, format)
@@ -248,9 +256,10 @@ class OmeroManagerMixin(HasTraits):
             raise ValueError("Unknown type passed: '{}'".format(type))
         return fn(model=model, path=path)
 
-    def _save_notebook(self, model, path):
+    def _save_notebook(self, model, path, sign=True):
         nb = nbformat.from_dict(model['content'])
-        self.check_and_sign(nb, path)
+        if sign:
+            self.check_and_sign(nb, path)
         model['content'] = nbformat.writes(nb)
         model['format'] = 'text'
         return self._save_file(path, model)
@@ -274,6 +283,7 @@ class OmeroManagerMixin(HasTraits):
             f = omero.model.OriginalFileI()
             f.setName(rstring(name))
             f.setPath(rstring(dirname))
+            f.setMtime(rtime(time()))
             if 'mimetype' in model:
                 f.setMimetype(rstring(model['mimetype']))
             f = updatesrv.saveAndReturnObject(f)
@@ -335,8 +345,7 @@ class OmeroManagerMixin(HasTraits):
         self.log.debug('file_exists: %s', path)
         path = _normalise_path(path)
         try:
-            self._get_omero_file(path)
-            return True
+            return self._get_omero_file(path)
         except HTTPError:
             return False
 
@@ -377,6 +386,15 @@ class OmeroCheckpoints(
         self.log.error('checkpoint_path %s', cp_path)
         return cp_path
 
+    def checkpoint_model(self, checkpoint_id, f):
+        """construct the info dict for a given checkpoint"""
+        info = {'id': str(checkpoint_id)}
+        if isinstance(f, dict):
+            info['last_modified'] = f['last_modified']
+        else:
+            info['last_modified'] = self._get_mtime(f)
+        return info
+
     def create_file_checkpoint(self, content, format, path):
         self.log.error(
             'create_file_checkpoint %s %s %s', content, format, path)
@@ -385,15 +403,15 @@ class OmeroCheckpoints(
         model['content'] = content
         model['format'] = format
         f = self._save_file(cp_path, model)
-        return 0, f['last_modified']
+        return self.checkpoint_model(0, f)
 
     def create_notebook_checkpoint(self, nb, path):
         self.log.error('create_notebook_checkpoint %s %s', nb, path)
         cp_path = self.checkpoint_path(0, path)
         model = _base_model(*cp_path.rsplit('/', 1))
         model['content'] = nb
-        f = self._save_notebook(model, cp_path)
-        return 0, f['last_modified']
+        f = self._save_notebook(model, cp_path, False)
+        return self.checkpoint_model(0, f)
 
     def get_file_checkpoint(self, checkpoint_id, path):
         self.log.error('get_file_checkpoint %s %s', checkpoint_id, path)
@@ -405,7 +423,7 @@ class OmeroCheckpoints(
         self.log.error('get_notebook_checkpoint %s %s', checkpoint_id, path)
         # -> {'type': 'notebook', 'content': <output of nbformat.read>}
         cp_path = self.checkpoint_path(checkpoint_id, path)
-        return self._get_notebook(cp_path, True, 'text')
+        return self._get_notebook(cp_path, True, 'text', False)
 
     def delete_checkpoint(self, checkpoint_id, path):
         self.log.error('delete_checkpoint %s %s', checkpoint_id, path)
@@ -415,8 +433,9 @@ class OmeroCheckpoints(
     def list_checkpoints(self, path):
         self.log.error('list_checkpoints %s', path)
         cp_path = self.checkpoint_path(0, path)
-        if not self.dir_exists(path) and self.file_exists(cp_path):
-            return [cp_path]
+        f = self.file_exists(cp_path)
+        if f:
+            return [self.checkpoint_model(0, f)]
         return []
 
     def rename_checkpoint(self, checkpoint_id, old_path, new_path):
@@ -425,16 +444,6 @@ class OmeroCheckpoints(
         cp_path_old = self.checkpoint_path(checkpoint_id, old_path)
         cp_path_new = self.checkpoint_path(checkpoint_id, new_path)
         self.rename_file(cp_path_old, cp_path_new)
-
-    # def checkpoint_model(self, checkpoint_id, os_path):
-    #     """construct the info dict for a given checkpoint"""
-    #     stats = os.stat(os_path)
-    #     last_modified = tz.utcfromtimestamp(stats.st_mtime)
-    #     info = dict(
-    #         id=checkpoint_id,
-    #         last_modified=last_modified,
-    #     )
-    #     return info
 
     # # Error Handling
     # def no_such_checkpoint(self, path, checkpoint_id):
