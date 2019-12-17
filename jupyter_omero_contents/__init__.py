@@ -1,1 +1,9 @@
-from .contents import OmeroContentsManager # noqa
+from .contents import (
+    OmeroContentsManager,
+    OmeroCheckpoints,
+)
+
+__all__ = [
+    'OmeroContentsManager',
+    'OmeroCheckpoints',
+]

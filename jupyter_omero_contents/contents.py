@@ -1,5 +1,14 @@
 from notebook.services.contents.manager import ContentsManager
-from traitlets import Unicode
+from notebook.services.contents.checkpoints import (
+    Checkpoints,
+    GenericCheckpointsMixin,
+)
+from traitlets import (
+    default,
+    HasTraits,
+    Instance,
+    Unicode,
+)
 from tornado.web import HTTPError
 from base64 import (
     b64encode,
@@ -43,7 +52,7 @@ def _normalise_path(p):
     return p
 
 
-class OmeroContentsManager(ContentsManager):
+class OmeroManagerMixin(HasTraits):
     """
     https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html
     https://github.com/jupyter/notebook/blob/6.0.1/notebook/services/contents/manager.py
@@ -83,20 +92,23 @@ class OmeroContentsManager(ContentsManager):
         config=True,
     )
 
-    def __init__(self, *args, **kwargs):
-        super(OmeroContentsManager, self).__init__(*args, **kwargs)
-        self.client = omero.client(self.omero_host)
+    conn = Instance(
+        omero.gateway.BlitzGateway,
+        allow_none=False)
+
+    @default('conn')
+    def _conn_default(self):
+        client = omero.client(self.omero_host)
         if self.omero_session:
             session = self.client.joinSession(self.omero_session)
             session.detachOnDestroy()
             self.log.info('Logged in to %s with existing session',
                           self.omero_host)
         else:
-            session = self.client.createSession(
+            session = client.createSession(
                 self.omero_user, self.omero_password)
             self.log.info('Logged in to %s with new session', self.omero_host)
-        # self.client.enableKeepAlive(60)
-        self.conn = BlitzGateway(client_obj=self.client)
+        return BlitzGateway(client_obj=client)
 
     # https://github.com/quantopian/pgcontents/blob/5fad3f6840d82e6acde97f8e3abe835765fa824b/pgcontents/pgmanager.py#L115
     def guess_type(self, path, allow_directory=True):
@@ -207,12 +219,8 @@ class OmeroContentsManager(ContentsManager):
             - 'base64': raw bytes contents will be encoded as base64.
             - None: try to decode as UTF-8, and fall back to base64
         """
-        # TODO: TypeError: must be str, not bytes
-        # with f.asFileObj() as fo:
-        #     bcontent = fo.read()
-        rfs = f._conn.c.sf.createRawFileStore()
-        rfs.setFileId(f.id, f._conn.SERVICE_OPTS)
-        bcontent = rfs.read(0, rfs.size())
+        with f.asFileObj() as fo:
+            bcontent = fo.read()
         if format is None or format == 'text':
             try:
                 return bcontent.decode('utf8'), 'text'
@@ -269,7 +277,7 @@ class OmeroContentsManager(ContentsManager):
             if 'mimetype' in model:
                 f.setMimetype(rstring(model['mimetype']))
             f = updatesrv.saveAndReturnObject(f)
-        rfs = self.client.sf.createRawFileStore()
+        rfs = self.conn.c.sf.createRawFileStore()
         rfs.setFileId(unwrap(f.id), self.conn.SERVICE_OPTS)
 
         try:
@@ -341,3 +349,96 @@ class OmeroContentsManager(ContentsManager):
         self.log.debug('is_hidden: %s', path)
         path = _normalise_path(path)
         return path.rsplit('/', 1)[-1].startswith('.')
+
+
+class OmeroContentsManager(OmeroManagerMixin, ContentsManager):
+    pass
+
+
+class OmeroCheckpoints(
+        OmeroManagerMixin, GenericCheckpointsMixin, Checkpoints):
+    """
+    Since we don't support directories use a flat filename instead
+    """
+
+    checkpoint_prefix = Unicode(
+        '._checkpoint{id}_',
+        config=True,
+        help="""The prefix to add to checkpoint files. `{id}` will be replaced
+        with a checkpoint id.""",
+    )
+
+    def checkpoint_path(self, checkpoint_id, path):
+        """find the path to a checkpoint"""
+        path = _normalise_path(path)
+        parent, name = path.rsplit('/', 1)
+        prefix = self.checkpoint_prefix.format(id=checkpoint_id)
+        cp_path = u"{}/{}{}".format(parent, prefix, name)
+        self.log.error('checkpoint_path %s', cp_path)
+        return cp_path
+
+    def create_file_checkpoint(self, content, format, path):
+        self.log.error(
+            'create_file_checkpoint %s %s %s', content, format, path)
+        cp_path = self.checkpoint_path(0, path)
+        model = _base_model(*cp_path.rsplit('/', 1))
+        model['content'] = content
+        model['format'] = format
+        f = self._save_file(cp_path, model)
+        return 0, f['last_modified']
+
+    def create_notebook_checkpoint(self, nb, path):
+        self.log.error('create_notebook_checkpoint %s %s', nb, path)
+        cp_path = self.checkpoint_path(0, path)
+        model = _base_model(*cp_path.rsplit('/', 1))
+        model['content'] = nb
+        f = self._save_notebook(model, cp_path)
+        return 0, f['last_modified']
+
+    def get_file_checkpoint(self, checkpoint_id, path):
+        self.log.error('get_file_checkpoint %s %s', checkpoint_id, path)
+        # -> {'type': 'file', 'content': <str>, 'format': {'text', 'base64'}}
+        cp_path = self.checkpoint_path(checkpoint_id, path)
+        return self._get_file(cp_path, True, None)
+
+    def get_notebook_checkpoint(self, checkpoint_id, path):
+        self.log.error('get_notebook_checkpoint %s %s', checkpoint_id, path)
+        # -> {'type': 'notebook', 'content': <output of nbformat.read>}
+        cp_path = self.checkpoint_path(checkpoint_id, path)
+        return self._get_notebook(cp_path, True, 'text')
+
+    def delete_checkpoint(self, checkpoint_id, path):
+        self.log.error('delete_checkpoint %s %s', checkpoint_id, path)
+        cp_path = self.checkpoint_path(checkpoint_id, path)
+        self.delete_file(cp_path)
+
+    def list_checkpoints(self, path):
+        self.log.error('list_checkpoints %s', path)
+        cp_path = self.checkpoint_path(0, path)
+        if not self.dir_exists(path) and self.file_exists(cp_path):
+            return [cp_path]
+        return []
+
+    def rename_checkpoint(self, checkpoint_id, old_path, new_path):
+        self.log.error(
+            'rename_checkpoint %s %s %s', checkpoint_id, old_path, new_path)
+        cp_path_old = self.checkpoint_path(checkpoint_id, old_path)
+        cp_path_new = self.checkpoint_path(checkpoint_id, new_path)
+        self.rename_file(cp_path_old, cp_path_new)
+
+    # def checkpoint_model(self, checkpoint_id, os_path):
+    #     """construct the info dict for a given checkpoint"""
+    #     stats = os.stat(os_path)
+    #     last_modified = tz.utcfromtimestamp(stats.st_mtime)
+    #     info = dict(
+    #         id=checkpoint_id,
+    #         last_modified=last_modified,
+    #     )
+    #     return info
+
+    # # Error Handling
+    # def no_such_checkpoint(self, path, checkpoint_id):
+    #     raise HTTPError(
+    #         404,
+    #         u'Checkpoint does not exist: %s@%s' % (path, checkpoint_id)
+    #     )
