@@ -9,6 +9,7 @@ from traitlets import (
     Instance,
     Unicode,
 )
+from tornado.ioloop import PeriodicCallback
 from tornado.web import HTTPError
 from base64 import (
     b64encode,
@@ -103,6 +104,8 @@ class OmeroManagerMixin(HasTraits):
         config=True,
     )
 
+    keep_alive = Instance(PeriodicCallback)
+
     @default('conn')
     def _conn_default(self):
         client = omero.client(self.omero_host)
@@ -115,9 +118,9 @@ class OmeroManagerMixin(HasTraits):
             session = client.createSession(
                 self.omero_user, self.omero_password)
             self.log.info('Logged in to %s with new session', self.omero_host)
-        # TODO: enableKeepAlive seems to prevent shutdown, try tornado
-        # background loop which calls conn.c.sf.keepAlive(None) instead
-        client.enableKeepAlive(60)
+        # client.enableKeepAlive() blocks shutdown, use a tornado loop instead
+        self.keep_alive = PeriodicCallback(self._send_keep_alive, 60000)
+        self.keep_alive.start()
         return BlitzGateway(client_obj=client)
 
     def _get_mtime(self, f):
@@ -365,6 +368,10 @@ class OmeroManagerMixin(HasTraits):
         self.log.debug('is_hidden(%s)', path)
         path = _normalise_path(path)
         return path.rsplit('/', 1)[-1].startswith('.')
+
+    def _send_keep_alive(self):
+        self.log.debug('Sending keepalive')
+        self.conn.c.sf.keepAlive(None)
 
 
 class OmeroContentsManager(OmeroManagerMixin, ContentsManager):
