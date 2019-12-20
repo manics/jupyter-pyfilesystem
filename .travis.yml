@@ -1,0 +1,20 @@
+language: python
+
+python:
+  - "3.6"
+
+install:
+  - pip install flake8
+
+script:
+  - flake8 .
+  - python setup.py sdist
+  - python -mpip install dist/*.tar.gz
+
+deploy:
+  - provider: pypi
+    user: __token__
+    # password: $PYPI_PASSWORD
+    distributions: sdist bdist_wheel
+    on:
+      tags: true
