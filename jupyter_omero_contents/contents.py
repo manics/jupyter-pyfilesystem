@@ -115,6 +115,8 @@ class OmeroManagerMixin(HasTraits):
             session = client.createSession(
                 self.omero_user, self.omero_password)
             self.log.info('Logged in to %s with new session', self.omero_host)
+        # TODO: enableKeepAlive seems to prevent shutdown, try tornado
+        # background loop which calls conn.c.sf.keepAlive(None) instead
         client.enableKeepAlive(60)
         return BlitzGateway(client_obj=client)
 
