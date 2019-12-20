@@ -115,6 +115,7 @@ class OmeroManagerMixin(HasTraits):
             session = client.createSession(
                 self.omero_user, self.omero_password)
             self.log.info('Logged in to %s with new session', self.omero_host)
+        client.enableKeepAlive(60)
         return BlitzGateway(client_obj=client)
 
     def _get_mtime(self, f):
