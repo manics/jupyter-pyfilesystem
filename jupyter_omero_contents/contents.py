@@ -346,10 +346,6 @@ class OmeroManagerMixin(HasTraits):
         f.setName(rstring(name))
         updatesrv = self.conn.getUpdateService()
         f = updatesrv.saveAndReturnObject(f)
-        # TODO:
-        # This causes an error in super().rename() due to checkpoints not being
-        # implemented:
-        # self.checkpoints.rename_all_checkpoints(old_path, new_path)
 
     def file_exists(self, path):
         self.log.debug('file_exists(%s)', path)
