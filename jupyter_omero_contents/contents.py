@@ -97,7 +97,11 @@ class OmeroManagerMixin(HasTraits):
 
     conn = Instance(
         omero.gateway.BlitzGateway,
-        allow_none=False)
+        allow_none=False,
+        help=('OMERO BlitzGateway object with active session, default is to '
+              'create a new connection using provided parameters'),
+        config=True,
+    )
 
     @default('conn')
     def _conn_default(self):

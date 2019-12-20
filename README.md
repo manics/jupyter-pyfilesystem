@@ -25,3 +25,9 @@ If you need an OMERO session:
 omero login
 omero sessions list
 ```
+
+OMERO credentials can also be configured using environment variables:
+- `OMERO_HOST`
+- `OMERO_USER`
+- `OMERO_PASSWORD`
+- `OMERO_SESSION`
