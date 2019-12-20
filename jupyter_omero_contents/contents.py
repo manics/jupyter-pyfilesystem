@@ -107,7 +107,7 @@ class OmeroManagerMixin(HasTraits):
     def _conn_default(self):
         client = omero.client(self.omero_host)
         if self.omero_session:
-            session = self.client.joinSession(self.omero_session)
+            session = client.joinSession(self.omero_session)
             session.detachOnDestroy()
             self.log.info('Logged in to %s with existing session',
                           self.omero_host)
