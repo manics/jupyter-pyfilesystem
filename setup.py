@@ -1,14 +1,17 @@
 import setuptools
 
 setuptools.setup(
-    name='jupyter-omero-contents',
+    name='jupyter-pyfilesystem-contents',
     version='0.0.1',
-    url='https://github.com/manics/jupyter-omero-contents',
+    url='https://github.com/manics/jupyter-pyfilesystem-contents',
     author='Simon Li',
     license='BSD 3-Clause',
-    description='Jupyter Notebook OMERO Contents Manager',
+    description='Jupyter Notebook PyFilesystem Contents Manager',
     packages=setuptools.find_packages(),
-    install_requires=['notebook'],
+    install_requires=[
+        'notebook',
+        'fs>=2'
+    ],
     python_requires='>=3.5',
     classifiers=[
         'Framework :: Jupyter',

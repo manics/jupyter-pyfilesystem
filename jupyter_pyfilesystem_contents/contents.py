@@ -7,31 +7,25 @@ from traitlets import (
     default,
     HasTraits,
     Instance,
+    TraitError,
     Unicode,
+    validate,
 )
-from tornado.ioloop import PeriodicCallback
+from traitlets.config.configurable import SingletonConfigurable
 from tornado.web import HTTPError
 from base64 import (
     b64encode,
     b64decode,
 )
 from datetime import datetime
-from hashlib import sha1
 import mimetypes
 import nbformat
-import os
-from time import time
+import re
 
-import omero.clients
-from omero.gateway import BlitzGateway
-from omero.rtypes import (
-    rstring,
-    rtime,
-    unwrap,
-)
-
-# Directories don't really exist
-DUMMY_CREATED_DATE = datetime.fromtimestamp(0)
+from fs import open_fs
+from fs.base import FS
+from fs.errors import ResourceNotFound
+import fs.path as fspath
 
 
 # https://github.com/quantopian/pgcontents/blob/5fad3f6840d82e6acde97f8e3abe835765fa824b/pgcontents/api_utils.py#L25
@@ -51,12 +45,31 @@ def _base_model(dirname, name):
 
 
 def _normalise_path(p):
-    if not p.startswith('/'):
-        p = '/' + p
-    return p
+    path = '/' + p.strip('/')
+    print('_normalise_path', p, path)
+    return path
 
 
-class OmeroManagerMixin(HasTraits):
+DEFAULT_CREATED_DATE = datetime.utcfromtimestamp(0)
+
+
+def _created_modified(details):
+    created = details.created or details.modified or DEFAULT_CREATED_DATE
+    modified = details.modified or details.created or DEFAULT_CREATED_DATE
+    return created, modified
+
+
+class FilesystemHandle(SingletonConfigurable):
+
+    def __init__(self, fs_url):
+        if not re.match(r'^([a-z][a-z0-9+\-.]*)://', fs_url):
+            raise TraitError('Invalid fs_url: {}'.format(fs_url))
+        self.fs_url = fs_url
+        self.log.debug('Opening filesystem %s', fs_url)
+        self.fs = open_fs(self.fs_url, writeable=True, create=True)
+
+
+class FsManagerMixin(HasTraits):
     """
     https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html
     https://github.com/jupyter/notebook/blob/6.0.1/notebook/services/contents/manager.py
@@ -69,62 +82,22 @@ class OmeroManagerMixin(HasTraits):
     https://github.com/jupyter/notebook/blob/b8b66332e2023e83d2ee04f83d8814f567e01a4e/notebook/services/contents/filecheckpoints.py
     """
 
-    omero_host = Unicode(
-        os.getenv('OMERO_HOST', ''),
-        help='OMERO host or URL connection',
-        config=True,
-    )
-
-    omero_user = Unicode(
-        os.getenv('OMERO_USER'),
-        allow_none=True,
-        help='OMERO session ID',
-        config=True,
-    )
-
-    omero_password = Unicode(
-        os.getenv('OMERO_PASSWORD'),
-        allow_none=True,
-        help='OMERO session ID',
-        config=True,
-    )
-
-    omero_session = Unicode(
-        os.getenv('OMERO_SESSION'),
-        allow_none=True,
-        help='OMERO session ID',
-        config=True,
-    )
-
-    conn = Instance(
-        omero.gateway.BlitzGateway,
+    fs = Instance(
+        FS,
         allow_none=False,
-        help=('OMERO BlitzGateway object with active session, default is to '
-              'create a new connection using provided parameters'),
-        config=True,
     )
 
-    keep_alive = Instance(PeriodicCallback)
+    @default('fs')
+    def _fs_default(self):
+        instance = FilesystemHandle.instance(self.fs_url)
+        assert instance.fs_url == self.fs_url
+        return instance.fs
 
-    @default('conn')
-    def _conn_default(self):
-        client = omero.client(self.omero_host)
-        if self.omero_session:
-            session = client.joinSession(self.omero_session)
-            session.detachOnDestroy()
-            self.log.info('Logged in to %s with existing session',
-                          self.omero_host)
-        else:
-            session = client.createSession(
-                self.omero_user, self.omero_password)
-            self.log.info('Logged in to %s with new session', self.omero_host)
-        # client.enableKeepAlive() blocks shutdown, use a tornado loop instead
-        self.keep_alive = PeriodicCallback(self._send_keep_alive, 60000)
-        self.keep_alive.start()
-        return BlitzGateway(client_obj=client)
-
-    def _get_mtime(self, f):
-        return datetime.utcfromtimestamp(f.getMtime()/1000)
+    fs_url = Unicode(
+        allow_none=False,
+        help='FS URL',
+        config=True,
+    )
 
     # https://github.com/quantopian/pgcontents/blob/5fad3f6840d82e6acde97f8e3abe835765fa824b/pgcontents/pgmanager.py#L115
     def guess_type(self, path, allow_directory=True):
@@ -169,75 +142,60 @@ class OmeroManagerMixin(HasTraits):
         return model
 
     def _get_directory(self, path, content, format):
-        """
-        Only one directory /jupyter is currently supported
-        """
-        if path == '/':
-            return self._get_root(content, format)
-        if path.strip('/') != 'jupyter':
-            raise HTTPError(404, 'Directory {} not found'.format(path))
+        try:
+            d = self.fs.getdetails(path)
+        except ResourceNotFound as e:
+            raise HTTPError(404, 'Directory not found: {}: {}'.format(path, e))
+        if not d.is_dir:
+            raise HTTPError(404, 'Not a directory: {}'.format(path))
 
-        model = _base_model(*path.rsplit('/', 1))
+        model = _base_model(*fspath.split(path))
         model['type'] = 'directory'
         model['size'] = None
-        model['format'] = 'json'
-        model['created'] = model['last_modified'] = DUMMY_CREATED_DATE
+        model['format'] = None
+        model['created'], model['last_modified'] = _created_modified(d)
 
         if content:
             model['content'] = []
-            for f in self.conn.getObjects(
-                    'OriginalFile', attributes={'path': '/jupyter'}):
-                model['content'].append(self._file_model(f, False, None))
-
-        return model
-
-    def _get_root(self, content, format):
-        model = _base_model('', '')
-        model['type'] = 'directory'
-        model['size'] = None
-        model['format'] = 'json'
-        model['created'] = model['last_modified'] = DUMMY_CREATED_DATE
-        if content:
-            model['content'] = [
-                self._get_directory('/jupyter', 'False', format)]
+            model['format'] = 'json'
+            for item in self.fs.scandir(path, ['basic', 'details']):
+                child_path = fspath.join(path, item.name)
+                if item.is_dir:
+                    model['content'].append(
+                        self._get_directory(child_path, False, None))
+                if item.is_file:
+                    model['content'].append(
+                        self._get_file(child_path, content, format))
         return model
 
     def _get_file(self, path, content, format):
-        f = self._get_omero_file(path)
-        return self._file_model(f, content, format)
+        self.log.debug('_get_file(%s)', path)
+        try:
+            f = self.fs.getdetails(path)
+        except ResourceNotFound as e:
+            raise HTTPError(404, 'File not found: {}: {}'.format(path, e))
+        if not f.is_file:
+            raise HTTPError(404, 'Not a file: {}'.format(path))
+        return self._file_model(path, f, content, format)
 
-    def _file_model(self, f, content, format):
-        model = _base_model(f.getPath(), f.getName())
+    def _file_model(self, path, f, content, format):
+        model = _base_model(*fspath.split(path))
         model['type'] = 'file'
-        model['last_modified'] = model['created'] = self._get_mtime(f)
-        model['size'] = f.getSize()
+        model['created'], model['last_modified'] = _created_modified(f)
+        model['size'] = f.size
         if content:
-            model['content'], model['format'] = self._read_file(f, format)
-            model['mimetype'] = f.getMimetype()
-            if not model['mimetype']:
-                model['mimetype'] = mimetypes.guess_type(model['path'])[0]
+            model['content'], model['format'] = self._read_file(path, format)
+            model['mimetype'] = mimetypes.guess_type(model['path'])[0]
         return model
 
-    def _get_omero_file(self, path):
-        if '/' not in path:
-            raise HTTPError(404, 'File {} not found'.format(path))
-        dirname, name = path.rsplit('/', 1)
-        if dirname != '/jupyter':
-            raise HTTPError(404, 'File {} not found'.format(path))
-        f = self.conn.getObject(
-            'OriginalFile', attributes={'path': '/jupyter', 'name': name})
-        if not f:
-            raise HTTPError(404, 'File {} not found'.format(path))
-        return f
-
-    def _read_file(self, f, format):
+    def _read_file(self, path, format):
         """
         :param format:
             - 'text': contents will be decoded as UTF-8.
             - 'base64': raw bytes contents will be encoded as base64.
             - None: try to decode as UTF-8, and fall back to base64
         """
-        with f.asFileObj() as fo:
+        with self.fs.openbin(path, 'r') as fo:
             bcontent = fo.read()
         if format is None or format == 'text':
             try:
@@ -246,7 +204,7 @@ class OmeroManagerMixin(HasTraits):
                 if format == 'text':
                     raise HTTPError(
                         400,
-                        "{}/{} is not UTF-8 encoded".format(f.path, f.name),
+                        "{} is not UTF-8 encoded".format(path),
                         reason='bad format')
         return b64encode(bcontent).decode('ascii'), 'base64'
 
@@ -275,7 +233,10 @@ class OmeroManagerMixin(HasTraits):
         return self._save_file(path, model)
 
     def _save_directory(self, model, path):
-        raise HTTPError(400, 'Saving directories not supported')
+        self.fs.makedir(path, recreate=True)
+        model = self._get_directory(path, False, None)
+        self.log.error(model)
+        return model
 
     def _save_file(self, path, model):
         if 'content' not in model:
@@ -283,22 +244,6 @@ class OmeroManagerMixin(HasTraits):
         if model.get('format') not in {'text', 'base64'}:
             raise HTTPError(
                 400, "Format of file contents must be 'text' or 'base64'")
-        dirname, name = path.rsplit('/', 1)
-        if dirname != '/jupyter':
-            raise HTTPError(400, 'Directory must be /jupyter')
-        updatesrv = self.conn.getUpdateService()
-        try:
-            f = self._get_omero_file(path)._obj
-        except HTTPError:
-            f = omero.model.OriginalFileI()
-            f.setName(rstring(name))
-            f.setPath(rstring(dirname))
-            f.setMtime(rtime(time()))
-            if 'mimetype' in model:
-                f.setMimetype(rstring(model['mimetype']))
-            f = updatesrv.saveAndReturnObject(f)
-        rfs = self.conn.c.sf.createRawFileStore()
-        rfs.setFileId(unwrap(f.id), self.conn.SERVICE_OPTS)
 
         try:
             if model['format'] == 'text':
@@ -309,90 +254,79 @@ class OmeroManagerMixin(HasTraits):
             raise HTTPError(
                 400, 'Encoding error saving {}: {}'.format(model['path'], e))
 
-        size = len(bcontent)
-        rfs.write(bcontent, 0, size)
-        rfs.truncate(size)
-        f = rfs.save()
-        # Size and hash seem to be automatically set by rfs.save()
-        # f.setHash(rstring(self._sha1(bcontent)))
-        # chk = omero.model.ChecksumAlgorithmI()
-        # chk.setValue(rstring(omero.model.enums.ChecksumAlgorithmSHA1160))
-        # f.setHasher(chk)
-        # f = updatesrv.saveAndReturnObject(f)
+        try:
+            with self.fs.openbin(path, 'w') as fo:
+                fo.write(bcontent)
+        except ResourceNotFound as e:
+            raise HTTPError(404, 'File not found: {} :e'.format(path, e))
         return self._get_file(path, False, None)
-
-    def _sha1(self, b):
-        h = sha1()
-        h.update(b)
-        return h.hexdigest()
 
     def delete_file(self, path):
         self.log.debug('delete_file(%s)', path)
         path = _normalise_path(path)
-        f = self._get_omero_file(path)
-        self.conn.deleteObject(f._obj)
+        self.sf.remove(path)
 
     def rename_file(self, old_path, new_path):
         self.log.debug('rename_file(%s %s)', old_path, new_path)
         old_path = _normalise_path(old_path)
         new_path = _normalise_path(new_path)
-        dirname, name = new_path.rsplit('/', 1)
-        if dirname != '/jupyter' or old_path.rsplit('/', 1)[0] != '/jupyter':
-            raise HTTPError(400, 'Directory must be /jupyter')
-        if self.file_exists(new_path):
-            raise HTTPError(
-                400, 'File {} exists, please delete first'.format(new_path))
-        f = self._get_omero_file(old_path)._obj
-        f.setName(rstring(name))
-        updatesrv = self.conn.getUpdateService()
-        f = updatesrv.saveAndReturnObject(f)
+        if self.fs.isdir(old_path):
+            self.fs.movedir(old_path, new_path, create=True)
+        else:
+            self.fs.move(old_path, new_path)
 
     def file_exists(self, path):
         self.log.debug('file_exists(%s)', path)
         path = _normalise_path(path)
-        try:
-            return self._get_omero_file(path)
-        except HTTPError:
-            return False
+        return self.fs.isfile(path)
 
     def dir_exists(self, path):
         self.log.debug('dir_exists(%s)', path)
         path = _normalise_path(path)
-        return path == '/' or path.strip('/') == 'jupyter'
+        return self.fs.isdir(path)
 
     def is_hidden(self, path):
         self.log.debug('is_hidden(%s)', path)
         path = _normalise_path(path)
-        return path.rsplit('/', 1)[-1].startswith('.')
+        # return fspath.basename(path).startswith('.')
+        return False
 
-    def _send_keep_alive(self):
-        self.log.debug('Sending keepalive')
-        self.conn.c.sf.keepAlive(None)
+    # def _send_keep_alive(self):
+    #     self.log.debug('Sending keepalive')
+    #     self.conn.c.sf.keepAlive(None)
 
 
-class OmeroContentsManager(OmeroManagerMixin, ContentsManager):
+class FsContentsManager(FsManagerMixin, ContentsManager):
     pass
 
 
-class OmeroCheckpoints(
-        OmeroManagerMixin, GenericCheckpointsMixin, Checkpoints):
-    """
-    Since we don't support directories use a flat filename instead
-    """
+class FsCheckpoints(
+        FsManagerMixin, GenericCheckpointsMixin, Checkpoints):
 
-    checkpoint_prefix = Unicode(
-        '._checkpoint{id}_',
+    checkpoint_dir = Unicode(
+        'ipynb_checkpoints',
         config=True,
-        help="""The prefix to add to checkpoint files. `{id}` will be replaced
-        with a checkpoint id.""",
+        help="""The directory name in which to keep file checkpoints
+        relative to the file's own directory""",
+    )
+
+    checkpoint_template = Unicode(
+        '{basename}-checkpoint{id}{ext}',
+        config=True,
+        help="""The prefix to add to checkpoint files.
+        `{basename}` is the filename with the extension, `{ext}` is the
+        extension including `.`, `{id}` will be replaced by the checkpoint id.
+        """,
     )
 
     def _checkpoint_path(self, checkpoint_id, path):
         """find the path to a checkpoint"""
         path = _normalise_path(path)
-        parent, name = path.rsplit('/', 1)
-        prefix = self.checkpoint_prefix.format(id=checkpoint_id)
-        cp_path = u"{}/{}{}".format(parent, prefix, name)
+        parent, name = fspath.split(path)
+        basename, ext = fspath.splitext(name)
+        cp_path = fspath.join(
+            parent, self.checkpoint_dir, self.checkpoint_template.format(
+                basename=basename, id=checkpoint_id, ext=ext))
         return cp_path
 
     def _checkpoint_model(self, checkpoint_id, f):
@@ -401,13 +335,21 @@ class OmeroCheckpoints(
         if isinstance(f, dict):
             info['last_modified'] = f['last_modified']
         else:
-            info['last_modified'] = self._get_mtime(f)
+            info['last_modified'] = f.modified
         return info
+
+    def _ensure_checkpoint_dir(self, cp_path):
+        self.log.debug('_ensure_checkpoint_dir(%s)', cp_path)
+        dirname, basename = fspath.split(cp_path)
+        self.log.debug('%s %s %s', dirname, self.dir_exists(dirname), basename)
+        if not self.dir_exists(dirname):
+            self._save_directory(None, dirname)
 
     def create_file_checkpoint(self, content, format, path):
         self.log.debug('create_file_checkpoint(%s)', path)
         cp_path = self._checkpoint_path(0, path)
-        model = _base_model(*cp_path.rsplit('/', 1))
+        self._ensure_checkpoint_dir(cp_path)
+        model = _base_model(*fspath.split(cp_path))
         model['content'] = content
         model['format'] = format
         f = self._save_file(cp_path, model)
@@ -416,7 +358,8 @@ class OmeroCheckpoints(
     def create_notebook_checkpoint(self, nb, path):
         self.log.debug('create_notebook_checkpoint(%s)', path)
         cp_path = self._checkpoint_path(0, path)
-        model = _base_model(*cp_path.rsplit('/', 1))
+        self._ensure_checkpoint_dir(cp_path)
+        model = _base_model(*fspath.split(cp_path))
         model['content'] = nb
         f = self._save_notebook(model, cp_path, False)
         return self._checkpoint_model(0, f)
@@ -441,8 +384,8 @@ class OmeroCheckpoints(
     def list_checkpoints(self, path):
         self.log.debug('list_checkpoints(%s)', path)
         cp_path = self._checkpoint_path(0, path)
-        f = self.file_exists(cp_path)
-        if f:
+        if self.file_exists(cp_path):
+            f = self._get_file(cp_path, False, None)
             return [self._checkpoint_model(0, f)]
         return []
 
@@ -451,11 +394,5 @@ class OmeroCheckpoints(
             'rename_checkpoint(%s %s %s)', checkpoint_id, old_path, new_path)
         cp_path_old = self._checkpoint_path(checkpoint_id, old_path)
         cp_path_new = self._checkpoint_path(checkpoint_id, new_path)
+        self._ensure_checkpoint_dir(cp_path_new)
         self.rename_file(cp_path_old, cp_path_new)
-
-    # # Error Handling
-    # def no_such_checkpoint(self, path, checkpoint_id):
-    #     raise HTTPError(
-    #         404,
-    #         u'Checkpoint does not exist: %s@%s' % (path, checkpoint_id)
-    #     )

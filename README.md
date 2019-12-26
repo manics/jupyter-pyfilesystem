@@ -1,6 +1,6 @@
-# Jupyter Notebook OMERO Contents Manager
+# Jupyter Notebook PyFilesystem Contents Manager
 
-A [Jupyter Notebooks ContentsManager](https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html#writing-a-custom-contentsmanager) that uses [OMERO](https://www.openmicroscopy.org/omero/) for storing files.
+A [Jupyter Notebooks ContentsManager](https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html#writing-a-custom-contentsmanager) that uses [PyFilesystem](https://www.pyfilesystem.org/) for storing files.
 
 
 
