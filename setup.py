@@ -1,7 +1,7 @@
 import setuptools
 
 setuptools.setup(
-    name='jupyter-pyfilesystem-contents',
+    name='jupyter-pyfilesystem',
     version='0.0.1',
     url='https://github.com/manics/jupyter-pyfilesystem-contents',
     author='Simon Li',
@@ -11,6 +11,10 @@ setuptools.setup(
     install_requires=[
         'notebook',
         'fs>=2'
+    ],
+    tests_requires=[
+        'pytest',
+        'nose',
     ],
     python_requires='>=3.5',
     classifiers=[

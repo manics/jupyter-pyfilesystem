@@ -9,7 +9,6 @@ from traitlets import (
     Instance,
     TraitError,
     Unicode,
-    validate,
 )
 from traitlets.config.configurable import SingletonConfigurable
 from tornado.web import HTTPError
@@ -18,13 +17,18 @@ from base64 import (
     b64decode,
 )
 from datetime import datetime
+from functools import wraps
 import mimetypes
 import nbformat
 import re
 
 from fs import open_fs
 from fs.base import FS
-from fs.errors import ResourceNotFound
+from fs.errors import (
+    DestinationExists,
+    IllegalBackReference,
+    ResourceNotFound,
+)
 import fs.path as fspath
 
 
@@ -32,7 +36,7 @@ import fs.path as fspath
 def _base_model(dirname, name):
     return {
         'name': name,
-        'path': dirname + '/' + name,
+        'path': (dirname + '/' + name).strip('/'),
         'writable': True,
         'last_modified': None,
         'created': None,
@@ -44,12 +48,6 @@ def _base_model(dirname, name):
     }
 
 
-def _normalise_path(p):
-    path = '/' + p.strip('/')
-    print('_normalise_path', p, path)
-    return path
-
-
 DEFAULT_CREATED_DATE = datetime.utcfromtimestamp(0)
 
 
@@ -59,14 +57,42 @@ def _created_modified(details):
     return created, modified
 
 
+def wrap_fs_errors(type=None):
+    """
+    Decorator to convert fs.errors into HTTPErrors.
+    Wrapped method must have arguments `self` and `path`
+    as the first two arguments
+    """
+    def wrap_fs_errors_with_type(func):
+        @wraps(func)
+        def check(self, path, *args, **kwargs):
+            t = (type + ' ') if type else ''
+            try:
+                return func(self, path, *args, **kwargs)
+            except (ResourceNotFound, IllegalBackReference) as e:
+                raise HTTPError(404, '%s"%s" not found: %s', t, path, e)
+            except DestinationExists as e:
+                raise HTTPError(409, '%s"%s" conflicts: %s', t, path, e)
+        return check
+    return wrap_fs_errors_with_type
+
+
 class FilesystemHandle(SingletonConfigurable):
+    """
+    A singleton filesystem handle.
+
+    This ensures ContentsManager and Checkpoints use the same FS handle.
+    """
 
     def __init__(self, fs_url):
-        if not re.match(r'^([a-z][a-z0-9+\-.]*)://', fs_url):
+        m = re.match(r'^([a-z][a-z0-9+\-.]*)://', fs_url)
+        if not m:
             raise TraitError('Invalid fs_url: {}'.format(fs_url))
         self.fs_url = fs_url
+        self.fsname = m.group()
         self.log.debug('Opening filesystem %s', fs_url)
         self.fs = open_fs(self.fs_url, writeable=True, create=True)
+        self.log.info('Opened filesystem %s', self.fsname)
 
 
 class FsManagerMixin(HasTraits):
@@ -82,10 +108,7 @@ class FsManagerMixin(HasTraits):
     https://github.com/jupyter/notebook/blob/b8b66332e2023e83d2ee04f83d8814f567e01a4e/notebook/services/contents/filecheckpoints.py
     """
 
-    fs = Instance(
-        FS,
-        allow_none=False,
-    )
+    fs = Instance(FS)
 
     @default('fs')
     def _fs_default(self):
@@ -114,8 +137,7 @@ class FsManagerMixin(HasTraits):
             return 'file'
 
     def get(self, path, content=True, type=None, format=None):
-        self.log.debug('get(%s)', path)
-        path = _normalise_path(path)
+        self.log.debug('get(%s %s)', path, type)
         if type is None:
             type = self.guess_type(path)
         try:
@@ -126,9 +148,12 @@ class FsManagerMixin(HasTraits):
             }[type]
         except KeyError:
             raise ValueError("Unknown type passed: '{}'".format(type))
-        return fn(path=path, content=content, format=format)
+        return fn(path=path, content=content, format=format, type=type)
 
-    def _get_notebook(self, path, content, format, trust=True):
+    @wrap_fs_errors('notebook')
+    def _get_notebook(self, path, content, format, *, type=None, trust=True):
+        self.log.debug('_get_notebook(%s)', path)
+        path = self.fs.validatepath(path)
         model = self._get_file(path, content, format)
         model['type'] = 'notebook'
         if content:
@@ -141,13 +166,13 @@ class FsManagerMixin(HasTraits):
                 self.validate_notebook_model(model)
         return model
 
-    def _get_directory(self, path, content, format):
-        try:
-            d = self.fs.getdetails(path)
-        except ResourceNotFound as e:
-            raise HTTPError(404, 'Directory not found: {}: {}'.format(path, e))
+    @wrap_fs_errors('directory')
+    def _get_directory(self, path, content, format, *, type=None):
+        self.log.debug('_get_directory(%s)', path)
+        path = self.fs.validatepath(path)
+        d = self.fs.getdetails(path)
         if not d.is_dir:
-            raise HTTPError(404, 'Not a directory: {}'.format(path))
+            raise HTTPError(404, '"%s" not a directory', path)
 
         model = _base_model(*fspath.split(path))
         model['type'] = 'directory'
@@ -165,22 +190,24 @@ class FsManagerMixin(HasTraits):
                         self._get_directory(child_path, False, None))
                 if item.is_file:
                     model['content'].append(
-                        self._get_file(child_path, content, format))
+                        self._get_file(child_path, False, format))
         return model
 
-    def _get_file(self, path, content, format):
+    @wrap_fs_errors('file')
+    def _get_file(self, path, content, format, *, type=None):
         self.log.debug('_get_file(%s)', path)
-        try:
-            f = self.fs.getdetails(path)
-        except ResourceNotFound as e:
-            raise HTTPError(404, 'File not found: {}: {}'.format(path, e))
+        path = self.fs.validatepath(path)
+        f = self.fs.getdetails(path)
         if not f.is_file:
             raise HTTPError(404, 'Not a file: {}'.format(path))
-        return self._file_model(path, f, content, format)
+        model = self._file_model(path, f, content, format)
+        if type:
+            model['type'] = type
+        return model
 
     def _file_model(self, path, f, content, format):
         model = _base_model(*fspath.split(path))
-        model['type'] = 'file'
+        model['type'] = self.guess_type(path)
         model['created'], model['last_modified'] = _created_modified(f)
         model['size'] = f.size
         if content:
@@ -188,12 +215,14 @@ class FsManagerMixin(HasTraits):
             model['mimetype'] = mimetypes.guess_type(model['path'])[0]
         return model
 
+    @wrap_fs_errors('file')
     def _read_file(self, path, format):
+        self.log.debug('_read_file(%s)', path)
         """
         :param format:
-            - 'text': contents will be decoded as UTF-8.
-            - 'base64': raw bytes contents will be encoded as base64.
-            - None: try to decode as UTF-8, and fall back to base64
+          - 'text': contents will be decoded as UTF-8.
+          - 'base64': raw bytes contents will be encoded as base64.
+          - None: try to decode as UTF-8, and fall back to base64
         """
         with self.fs.openbin(path, 'r') as fo:
             bcontent = fo.read()
@@ -209,9 +238,8 @@ class FsManagerMixin(HasTraits):
         return b64encode(bcontent).decode('ascii'), 'base64'
 
     def save(self, model, path):
-        self.log.debug('save(%s)', path)
+        self.log.debug('save(%s %s)', path, model['type'])
         self.run_pre_save_hook(model=model, path=path)
-        path = _normalise_path(path)
         if 'type' not in model or not model['type']:
             raise HTTPError(400, 'No model type provided')
         try:
@@ -222,9 +250,11 @@ class FsManagerMixin(HasTraits):
             }[model['type']]
         except KeyError:
             raise ValueError("Unknown type passed: '{}'".format(type))
-        return fn(model=model, path=path)
+        return fn(path, model)
 
-    def _save_notebook(self, model, path, sign=True):
+    @wrap_fs_errors('notebook')
+    def _save_notebook(self, path, model, sign=True):
+        self.log.debug('_save_notebook(%s)', path)
         nb = nbformat.from_dict(model['content'])
         if sign:
             self.check_and_sign(nb, path)
@@ -232,13 +262,16 @@ class FsManagerMixin(HasTraits):
         model['format'] = 'text'
         return self._save_file(path, model)
 
-    def _save_directory(self, model, path):
+    @wrap_fs_errors('directory')
+    def _save_directory(self, path, model):
+        self.log.debug('_save_directory(%s)', path)
         self.fs.makedir(path, recreate=True)
         model = self._get_directory(path, False, None)
-        self.log.error(model)
         return model
 
+    @wrap_fs_errors('file')
     def _save_file(self, path, model):
+        self.log.debug('_save_file(%s)', path)
         if 'content' not in model:
             raise HTTPError(400, 'No file content provided')
         if model.get('format') not in {'text', 'base64'}:
@@ -254,42 +287,47 @@ class FsManagerMixin(HasTraits):
             raise HTTPError(
                 400, 'Encoding error saving {}: {}'.format(model['path'], e))
 
-        try:
-            with self.fs.openbin(path, 'w') as fo:
-                fo.write(bcontent)
-        except ResourceNotFound as e:
-            raise HTTPError(404, 'File not found: {} :e'.format(path, e))
+        with self.fs.openbin(path, 'w') as fo:
+            fo.write(bcontent)
         return self._get_file(path, False, None)
 
+    @wrap_fs_errors('file')
     def delete_file(self, path):
         self.log.debug('delete_file(%s)', path)
-        path = _normalise_path(path)
-        self.sf.remove(path)
+        path = self.fs.validatepath(path)
+        self.fs.remove(path)
 
+    @wrap_fs_errors('file')
     def rename_file(self, old_path, new_path):
         self.log.debug('rename_file(%s %s)', old_path, new_path)
-        old_path = _normalise_path(old_path)
-        new_path = _normalise_path(new_path)
+        old_path = self.fs.validatepath(old_path)
+        new_path = self.fs.validatepath(new_path)
+        if old_path == '/':
+            raise HTTPError(409, 'Unable to rename root /')
         if self.fs.isdir(old_path):
+            if self.fs.exists(new_path):
+                raise DestinationExists(new_path)
             self.fs.movedir(old_path, new_path, create=True)
         else:
             self.fs.move(old_path, new_path)
 
+    @wrap_fs_errors(None)
     def file_exists(self, path):
         self.log.debug('file_exists(%s)', path)
-        path = _normalise_path(path)
+        path = self.fs.validatepath(path)
         return self.fs.isfile(path)
 
+    @wrap_fs_errors(None)
     def dir_exists(self, path):
         self.log.debug('dir_exists(%s)', path)
-        path = _normalise_path(path)
+        path = self.fs.validatepath(path)
         return self.fs.isdir(path)
 
+    @wrap_fs_errors(None)
     def is_hidden(self, path):
         self.log.debug('is_hidden(%s)', path)
-        path = _normalise_path(path)
-        # return fspath.basename(path).startswith('.')
-        return False
+        path = self.fs.validatepath(path)
+        return fspath.basename(path).startswith('.')
 
     # def _send_keep_alive(self):
     #     self.log.debug('Sending keepalive')
@@ -304,7 +342,7 @@ class FsCheckpoints(
         FsManagerMixin, GenericCheckpointsMixin, Checkpoints):
 
     checkpoint_dir = Unicode(
-        'ipynb_checkpoints',
+        '.ipynb_checkpoints',
         config=True,
         help="""The directory name in which to keep file checkpoints
         relative to the file's own directory""",
@@ -321,7 +359,7 @@ class FsCheckpoints(
 
     def _checkpoint_path(self, checkpoint_id, path):
         """find the path to a checkpoint"""
-        path = _normalise_path(path)
+        path = self.fs.validatepath(path)
         parent, name = fspath.split(path)
         basename, ext = fspath.splitext(name)
         cp_path = fspath.join(
@@ -339,11 +377,10 @@ class FsCheckpoints(
         return info
 
     def _ensure_checkpoint_dir(self, cp_path):
-        self.log.debug('_ensure_checkpoint_dir(%s)', cp_path)
         dirname, basename = fspath.split(cp_path)
         self.log.debug('%s %s %s', dirname, self.dir_exists(dirname), basename)
         if not self.dir_exists(dirname):
-            self._save_directory(None, dirname)
+            self._save_directory(dirname, None)
 
     def create_file_checkpoint(self, content, format, path):
         self.log.debug('create_file_checkpoint(%s)', path)
@@ -361,7 +398,7 @@ class FsCheckpoints(
         self._ensure_checkpoint_dir(cp_path)
         model = _base_model(*fspath.split(cp_path))
         model['content'] = nb
-        f = self._save_notebook(model, cp_path, False)
+        f = self._save_notebook(cp_path, model, False)
         return self._checkpoint_model(0, f)
 
     def get_file_checkpoint(self, checkpoint_id, path):
@@ -374,7 +411,7 @@ class FsCheckpoints(
         # -> {'type': 'notebook', 'content': <output of nbformat.read>}
         self.log.debug('get_notebook_checkpoint(%s %s)', checkpoint_id, path)
         cp_path = self._checkpoint_path(checkpoint_id, path)
-        return self._get_notebook(cp_path, True, 'text', False)
+        return self._get_notebook(cp_path, True, 'text', trust=False)
 
     def delete_checkpoint(self, checkpoint_id, path):
         self.log.debug('delete_checkpoint(%s %s)', checkpoint_id, path)
