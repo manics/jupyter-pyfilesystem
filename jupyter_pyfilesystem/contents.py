@@ -4,18 +4,23 @@ from notebook.services.contents.checkpoints import (
     GenericCheckpointsMixin,
 )
 from traitlets import (
+    Bool,
     default,
     HasTraits,
     Instance,
+    Int,
     TraitError,
     Unicode,
 )
 from traitlets.config.configurable import SingletonConfigurable
+from tornado.ioloop import PeriodicCallback
 from tornado.web import HTTPError
 from base64 import (
     b64encode,
     b64decode,
 )
+
+import atexit
 from datetime import datetime
 from functools import wraps
 import mimetypes
@@ -28,6 +33,7 @@ from fs.errors import (
     DestinationExists,
     IllegalBackReference,
     ResourceNotFound,
+    ResourceReadOnly,
 )
 import fs.path as fspath
 
@@ -70,9 +76,15 @@ def wrap_fs_errors(type=None):
             try:
                 return func(self, path, *args, **kwargs)
             except (ResourceNotFound, IllegalBackReference) as e:
-                raise HTTPError(404, '%s"%s" not found: %s', t, path, e)
+                self.log.debug('Caught exception: %s', e)
+                raise HTTPError(404, '{}"{}" not found: {}'.format(t, path, e))
             except DestinationExists as e:
-                raise HTTPError(409, '%s"%s" conflicts: %s', t, path, e)
+                self.log.debug('Caught exception: {}'.format(e))
+                raise HTTPError(409, '{}"{}" conflicts: {}'.format(t, path, e))
+            except ResourceReadOnly as e:
+                self.log.debug('Caught exception: %s', e)
+                raise HTTPError(409, '{}"{}" is read-only: {}'.format(
+                    t, path, e))
         return check
     return wrap_fs_errors_with_type
 
@@ -84,15 +96,43 @@ class FilesystemHandle(SingletonConfigurable):
     This ensures ContentsManager and Checkpoints use the same FS handle.
     """
 
-    def __init__(self, fs_url):
+    def __init__(self, fs_url, *, create, writeable, closeonexit, keepalive):
         m = re.match(r'^([a-z][a-z0-9+\-.]*)://', fs_url)
         if not m:
             raise TraitError('Invalid fs_url: {}'.format(fs_url))
         self.fs_url = fs_url
         self.fsname = m.group()
         self.log.debug('Opening filesystem %s', fs_url)
-        self.fs = open_fs(self.fs_url, writeable=True, create=True)
+        self.fs = open_fs(self.fs_url, writeable=writeable, create=create)
         self.log.info('Opened filesystem %s', self.fsname)
+        self.keepalive_cb = None
+        if keepalive:
+            self.enable_keepalive(keepalive)
+        if closeonexit:
+            self.register_atexit()
+
+    def close(self):
+        self.log.debug('Closing filesystem %s', self.fs_url)
+        self.enable_keepalive(0)
+        self.fs.close()
+        self.log.info('Closed filesystem %s', self.fsname)
+
+    def keepalive(self):
+        d = self.fs.getdetails('/')
+        self.log.debug('keepalive: %s', d)
+
+    def enable_keepalive(self, interval):
+        self.log.debug('enable_keepalive(%s)', interval)
+        if self.keepalive_cb:
+            self.keepalive_cb.stop()
+            self.keepalive_cb = None
+        if interval > 0:
+            self.keepalive_cb = PeriodicCallback(
+                self.keepalive, interval * 1000)
+            self.keepalive_cb.start()
+
+    def register_atexit(self):
+        atexit.register(self.close)
 
 
 class FsManagerMixin(HasTraits):
@@ -112,13 +152,40 @@ class FsManagerMixin(HasTraits):
 
     @default('fs')
     def _fs_default(self):
-        instance = FilesystemHandle.instance(self.fs_url)
+        instance = FilesystemHandle.instance(
+            self.fs_url, create=self.create, writeable=self.writeable,
+            closeonexit=self.closeonexit, keepalive=self.keepalive)
         assert instance.fs_url == self.fs_url
         return instance.fs
 
     fs_url = Unicode(
         allow_none=False,
         help='FS URL',
+        config=True,
+    )
+
+    create = Bool(
+        default_value=True,
+        help='Create filesystem if necessary',
+        config=True,
+    )
+
+    writeable = Bool(
+        default_value=True,
+        help='Open filesystem for reading and writing',
+        config=True,
+    )
+
+    closeonexit = Bool(
+        default_value=True,
+        help='Register an atexit handler to close the filesystem',
+        config=True,
+    )
+
+    keepalive = Int(
+        default_value=0,
+        help='''Send keepalive at this interval (seconds), this might be needed
+        for remote filesystems''',
         config=True,
     )
 
