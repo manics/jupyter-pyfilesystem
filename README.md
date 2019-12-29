@@ -39,3 +39,7 @@ For example, this will make a remote request to get the details of `/` every 60 
 ```python
 c.FsContentsManager.keepalive = c.FsCheckpoints.keepalive = 60
 ```
+
+## Acknowledgements
+
+This repository is based on https://github.com/quantopian/pgcontents/tree/5fad3f6840d82e6acde97f8e3abe835765fa824b

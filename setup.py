@@ -3,7 +3,7 @@ import setuptools
 setuptools.setup(
     name='jupyter-pyfilesystem',
     version='0.0.1',
-    url='https://github.com/manics/jupyter-pyfilesystem-contents',
+    url='https://github.com/manics/jupyter-pyfilesystem',
     author='Simon Li',
     license='BSD 3-Clause',
     description='Jupyter Notebook PyFilesystem Contents Manager',
