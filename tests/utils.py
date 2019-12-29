@@ -4,40 +4,25 @@ Utilities for testing.
 """
 from __future__ import unicode_literals
 from contextlib import contextmanager
-from cryptography.fernet import Fernet
-from getpass import getuser
 from itertools import starmap
 import posixpath
 from unicodedata import normalize
 
-from IPython.utils import py3compat
-from nose.tools import nottest
-from sqlalchemy import create_engine
 from tornado.web import HTTPError
 
-from ..api_utils import api_path_join
-from ..crypto import FernetEncryption
-from ..schema import metadata
-from ..utils.ipycompat import (
+from nbformat.v4.nbbase import (
     new_code_cell,
     new_markdown_cell,
     new_notebook,
     new_raw_cell,
 )
-from ..utils.migrate import upgrade
 
-TEST_DB_URL = "postgresql://{user}@/pgcontents_testing".format(
-    user=getuser(),
-)
-
-
-def make_fernet():
-    return FernetEncryption(Fernet(Fernet.generate_key()))
+TEST_FS_URL = 'mem://'
 
 
 def _norm_unicode(s):
     """Normalize unicode strings"""
-    return normalize('NFC', py3compat.cast_unicode(s))
+    return normalize('NFC', s)
 
 
 @contextmanager
@@ -51,58 +36,12 @@ def assertRaisesHTTPError(testcase, status, msg=None):
         testcase.fail(msg)
 
 
-_tables = (
-    'pgcontents.remote_checkpoints',
-    'pgcontents.files',
-    'pgcontents.directories',
-    'pgcontents.users',
-)
-unexpected_tables = set(metadata.tables) - set(_tables)
-if unexpected_tables:
-    raise Exception("Unexpected tables in metadata: %s" % unexpected_tables)
+# def clear_test_db():
+# def remigrate_test_schema():
+# def drop_testing_db_tables():
+# def migrate_testing_db(revision='head'):
 
-
-@nottest
-def clear_test_db():
-    engine = create_engine(TEST_DB_URL)
-    with engine.connect() as conn:
-        for table in map(metadata.tables.__getitem__, _tables):
-            conn.execute(table.delete())
-
-
-@nottest
-def remigrate_test_schema():
-    """
-    Drop recreate the test db schema.
-    """
-    drop_testing_db_tables()
-    migrate_testing_db()
-
-
-@nottest
-def drop_testing_db_tables():
-    """
-    Drop all tables from the testing db.
-    """
-    engine = create_engine(TEST_DB_URL)
-    conn = engine.connect()
-    trans = conn.begin()
-    conn.execute('DROP SCHEMA IF EXISTS pgcontents CASCADE')
-    conn.execute('DROP TABLE IF EXISTS alembic_version CASCADE')
-
-    trans.commit()
-
-
-@nottest
-def migrate_testing_db(revision='head'):
-    """
-    Migrate the testing db to the latest alembic revision.
-    """
-    upgrade(TEST_DB_URL, revision)
-
-
-@nottest
-def test_notebook(name):
+def get_test_notebook(name):
     """
     Make a test notebook for the given name.
     """
@@ -131,7 +70,67 @@ def populate(contents_mgr):
     for dirname, nbname in dirs_nbs:
         contents_mgr.save({'type': 'directory'}, path=dirname)
         contents_mgr.save(
-            {'type': 'notebook', 'content': test_notebook(nbname)},
-            path=api_path_join(dirname, nbname),
+            {'type': 'notebook', 'content': get_test_notebook(nbname)},
+            path='{}/{}'.format(dirname, nbname),
         )
     return list(starmap(posixpath.join, dirs_nbs))
+
+
+def _separate_dirs_files(models):
+    """
+    Split an iterable of models into a list of file paths and a list of
+    directory paths.
+    """
+    dirs = []
+    files = []
+    for model in models:
+        if model['type'] == 'directory':
+            dirs.append(model['path'])
+        else:
+            files.append(model['path'])
+    return dirs, files
+
+
+def walk(mgr):
+    """
+    Like os.walk, but written in terms of the ContentsAPI.
+
+    Takes a ContentsManager and returns a generator of tuples of the form:
+    (directory name, [subdirectories], [files in directory])
+    """
+    return walk_dirs(mgr, [''])
+
+
+def walk_dirs(mgr, dirs):
+    """
+    Recursive helper for walk.
+    """
+    for directory in dirs:
+        children = mgr.get(
+            directory,
+            content=True,
+            type='directory',
+        )['content']
+        dirs, files = map(sorted, _separate_dirs_files(children))
+        yield directory, dirs, files
+        if dirs:
+            for entry in walk_dirs(mgr, dirs):
+                yield entry
+
+
+def walk_files(mgr):
+    """
+    Iterate over all files visible to ``mgr``.
+    """
+    for dir_, subdirs, files in walk_files(mgr):
+        for file_ in files:
+            yield file_
+
+
+def walk_files_with_content(mgr):
+    """
+    Iterate over the contents of all files visible to ``mgr``.
+    """
+    for _, _, files in walk(mgr):
+        for f in files:
+            yield mgr.get(f, content=True)

@@ -15,29 +15,26 @@
 """
 Run IPython's TestContentsManager using PostgresContentsManager.
 """
-from __future__ import unicode_literals
 
-from base64 import b64encode
-from cryptography.fernet import Fernet
 from itertools import combinations
 
-from pgcontents.pgmanager import PostgresContentsManager
+from fs import open_fs
+from jupyter_pyfilesystem import (
+    FsContentsManager,
+    FsCheckpoints,
+)
 from .utils import (
     assertRaisesHTTPError,
-    clear_test_db,
-    make_fernet,
     _norm_unicode,
-    TEST_DB_URL,
-    remigrate_test_schema,
 )
-from ..crypto import FernetEncryption
-from ..utils.ipycompat import TestContentsManager
-from ..utils.sync import walk_files_with_content
+from notebook.services.contents.tests.test_manager import TestContentsManager
+from .utils import (
+    walk_files_with_content,
+    TEST_FS_URL,
+)
 
-setup_module = remigrate_test_schema
 
-
-class PostgresContentsManagerTestCase(TestContentsManager):
+class FSManagerTestCase(TestContentsManager):
 
     @classmethod
     def tearDownClass(cls):
@@ -45,43 +42,27 @@ class PostgresContentsManagerTestCase(TestContentsManager):
         pass
 
     def setUp(self):
-        self.crypto = make_fernet()
-        self.contents_manager = PostgresContentsManager(
-            user_id='test',
-            db_url=TEST_DB_URL,
-            crypto=self.crypto,
-        )
-        self.contents_manager.ensure_user()
-        self.contents_manager.ensure_root_directory()
-
-        # We need to dispose of any engines created during tests or else the
-        # engine's QueuePool will leak connections even once this suite has
-        # finished running. Then as other test suites start to run, the number
-        # of connections will eventually creep up to the maximum number that
-        # postgres allows. For reference, see the SQLAlchemy docs here:
-        # https://docs.sqlalchemy.org/en/13/core/connections.html#engine-disposal
-        #
-        # This pattern should be repeated in any test class that creates a
-        # PostgresContentsManager or a PostgresCheckpoints object (note that
-        # even though the checkpoints manager lives on the contents manager it
-        # still creates its own engine). An alternative solution to calling
-        # dispose here would be to have these classes create engines with a
-        # NullPool when testing, but that 1) adds more latency, and 2) adds
-        # test-specific behavior to the classes themselves.
-        self.addCleanup(self.contents_manager.engine.dispose)
-        self.addCleanup(self.contents_manager.checkpoints.engine.dispose)
+        fs = open_fs(TEST_FS_URL)
+        self.contents_manager = FsContentsManager()
+        # self.contents_manager.fs_url = TEST_FS_URL
+        self.contents_manager.fs = fs
+        self.contents_manager.checkpoints = FsCheckpoints()
+        # self.contents_manager.checkpoints.fs_url = TEST_FS_URL
+        self.contents_manager.checkpoints.fs = fs
+        # self.addCleanup(self.contents_manager.engine.dispose)
 
     def tearDown(self):
-        clear_test_db()
+        print(self.contents_manager.fs)
+        # pass
 
-    def set_pgmgr_attribute(self, name, value):
-        """
-        Overridable method for setting attributes on our pgmanager.
+    # def set_pgmgr_attribute(self, name, value):
+    #     """
+    #     Overridable method for setting attributes on our pgmanager.
 
-        This exists so that we can re-use the tests here in
-        test_hybrid_manager.
-        """
-        setattr(self.contents_manager, name, value)
+    #     This exists so that we can re-use the tests here in
+    #     test_hybrid_manager.
+    #     """
+    #     setattr(self.contents_manager, name, value)
 
     def make_dir(self, api_path):
         self.contents_manager.new(
@@ -180,27 +161,6 @@ class PostgresContentsManagerTestCase(TestContentsManager):
         cm.rename(path, new_path)
         renamed = cm.get(new_path)
         self.assertGreater(renamed['last_modified'], saved['last_modified'])
-
-    def test_get_file_id(self):
-        cm = self.contents_manager
-
-        # Create a new notebook.
-        nb, name, path = self.new_notebook()
-        model = cm.get(path)
-
-        # Make sure we can get the id and it's not none.
-        id_ = cm.get_file_id(path)
-        self.assertIsNotNone(id_)
-
-        # Make sure the id stays the same after we edit and save.
-        self.add_code_cell(model['content'])
-        cm.save(model, path)
-        self.assertEqual(id_, cm.get_file_id(path))
-
-        # Make sure the id stays the same after a rename.
-        updated_path = "updated_name.ipynb"
-        cm.rename(path, updated_path)
-        self.assertEqual(id_, cm.get_file_id(updated_path))
 
     def test_rename_file(self):
         cm = self.contents_manager
@@ -387,78 +347,6 @@ class PostgresContentsManagerTestCase(TestContentsManager):
             'populated_dir/populated_sub_dir/empty_dir'
         )
         assert len(empty_dir_model['content']) == 0
-
-    def test_max_file_size(self):
-
-        cm = self.contents_manager
-        max_size = 120
-        self.set_pgmgr_attribute('max_file_size_bytes', max_size)
-
-        def size_in_db(s):
-            return len(self.crypto.encrypt(b64encode(s.encode('utf-8'))))
-
-        # max_file_size_bytes should be based on the size in the database, not
-        # the size of the input.
-        good = 'a' * 10
-        self.assertEqual(size_in_db(good), max_size)
-        cm.save(
-            model={
-                'content': good,
-                'format': 'text',
-                'type': 'file',
-            },
-            path='good.txt',
-        )
-        result = cm.get('good.txt')
-        self.assertEqual(result['content'], good)
-
-        bad = 'a' * 30
-        self.assertGreater(size_in_db(bad), max_size)
-        with assertRaisesHTTPError(self, 413):
-            cm.save(
-                model={
-                    'content': bad,
-                    'format': 'text',
-                    'type': 'file',
-                },
-                path='bad.txt',
-            )
-
-    def test_changing_crypto_disables_ability_to_read(self):
-        cm = self.contents_manager
-
-        _, _, nb_path = self.new_notebook()
-        nb_model = cm.get(nb_path)
-
-        file_path = 'file.txt'
-        cm.save(
-            model={
-                'content': 'not encrypted',
-                'format': 'text',
-                'type': 'file',
-            },
-            path=file_path,
-        )
-        file_model = cm.get(file_path)
-
-        alt_key = b64encode(b'fizzbuzz' * 4)
-        self.set_pgmgr_attribute('crypto', FernetEncryption(Fernet(alt_key)))
-
-        with assertRaisesHTTPError(self, 500):
-            cm.get(nb_path)
-
-        with assertRaisesHTTPError(self, 500):
-            cm.get(file_path)
-
-        # Restore the original crypto instance and verify that we can still
-        # decrypt.
-        self.set_pgmgr_attribute('crypto', self.crypto)
-
-        decrypted_nb_model = cm.get(nb_path)
-        self.assertEqual(nb_model, decrypted_nb_model)
-
-        decrypted_file_model = cm.get(file_path)
-        self.assertEqual(file_model, decrypted_file_model)
 
     def test_relative_paths(self):
         cm = self.contents_manager
