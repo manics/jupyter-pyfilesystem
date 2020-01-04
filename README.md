@@ -3,6 +3,13 @@
 A [Jupyter Notebooks ContentsManager](https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html#writing-a-custom-contentsmanager) that uses [PyFilesystem](https://www.pyfilesystem.org/) for storing files.
 
 
+## Installation
+
+```
+pip install jupyter-pyfilesystem
+```
+
+
 ## Example
 
 `jupyter_notebook_config.py`:
