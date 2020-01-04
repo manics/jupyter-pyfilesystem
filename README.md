@@ -1,4 +1,6 @@
 # Jupyter Notebook PyFilesystem Contents Manager
+[![Build Status](https://travis-ci.com/manics/jupyter-pyfilesystem.svg?branch=master)](https://travis-ci.com/manics/jupyter-pyfilesystem)
+[![PyPI](https://img.shields.io/pypi/v/jupyter-pyfilesystem)](https://pypi.org/project/jupyter-pyfilesystem/)
 
 A [Jupyter Notebooks ContentsManager](https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html#writing-a-custom-contentsmanager) that uses [PyFilesystem](https://www.pyfilesystem.org/) for storing files.
 

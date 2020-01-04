@@ -16,12 +16,12 @@ setuptools.setup(
     ],
     tests_requires=[
         'pytest',
-        'nose',
     ],
     python_requires='>=3.5',
     classifiers=[
         'Framework :: Jupyter',
         'License :: OSI Approved :: MIT License',
+        'Operating System :: OS Independent',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
         'Topic :: Scientific/Engineering',

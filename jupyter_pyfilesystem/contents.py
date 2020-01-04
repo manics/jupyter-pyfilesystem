@@ -360,9 +360,15 @@ class FsManagerMixin(HasTraits):
 
     @wrap_fs_errors('file')
     def delete_file(self, path):
+        # TODO: This is also used to delete directories
         self.log.debug('delete_file(%s)', path)
         path = self.fs.validatepath(path)
-        self.fs.remove(path)
+        if self.fs.isfile(path):
+            self.fs.remove(path)
+        elif self.fs.isdir(path):
+            self.fs.removedir(path)
+        else:
+            raise ResourceNotFound(path)
 
     @wrap_fs_errors('file')
     def rename_file(self, old_path, new_path):
