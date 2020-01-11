@@ -2,19 +2,24 @@ import setuptools
 
 setuptools.setup(
     name='jupyter-pyfilesystem',
-    version='0.0.5',
     url='https://github.com/manics/jupyter-pyfilesystem',
     author='Simon Li',
     license='MIT',
     description='Jupyter Notebook PyFilesystem Contents Manager',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
+    use_scm_version={
+        'write_to': 'jupyter_pyfilesystem/_version.py',
+    },
     packages=setuptools.find_packages(),
+    setup_requires=[
+        'setuptools_scm',
+    ],
     install_requires=[
         'notebook',
         'fs>=2,<3',
     ],
-    tests_requires=[
+    tests_require=[
         'pytest',
     ],
     python_requires='>=3.5',

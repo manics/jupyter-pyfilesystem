@@ -127,3 +127,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+jupyter_pyfilesystem/_version.py*
