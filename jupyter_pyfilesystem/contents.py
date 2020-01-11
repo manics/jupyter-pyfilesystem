@@ -6,13 +6,12 @@ from notebook.services.contents.checkpoints import (
 from traitlets import (
     Bool,
     default,
-    HasTraits,
     Instance,
     Int,
     TraitError,
     Unicode,
 )
-from traitlets.config.configurable import SingletonConfigurable
+from traitlets.config.configurable import LoggingConfigurable
 from tornado.ioloop import PeriodicCallback
 from tornado.web import HTTPError
 from base64 import (
@@ -89,12 +88,7 @@ def wrap_fs_errors(type=None):
     return wrap_fs_errors_with_type
 
 
-class FilesystemHandle(SingletonConfigurable):
-    """
-    A singleton filesystem handle.
-
-    This ensures ContentsManager and Checkpoints use the same FS handle.
-    """
+class FilesystemHandle(LoggingConfigurable):
 
     def __init__(self, fs_url, *, create, writeable, closeonexit, keepalive):
         m = re.match(r'^([a-z][a-z0-9+\-.]*)://', fs_url)
@@ -135,24 +129,19 @@ class FilesystemHandle(SingletonConfigurable):
         atexit.register(self.close)
 
 
-class FsManagerMixin(HasTraits):
+class FsContentsManager(ContentsManager):
     """
     https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html
     https://github.com/jupyter/notebook/blob/6.0.1/notebook/services/contents/manager.py
     https://github.com/jupyter/notebook/blob/6.0.1/notebook/services/contents/filemanager.py
     https://github.com/quantopian/pgcontents/blob/master/pgcontents/pgmanager.py
-
-    A single flat directory called jupyter containing OriginalFiles
-
-    Note checkpoints need to be either disabled or a different class configured
-    https://github.com/jupyter/notebook/blob/b8b66332e2023e83d2ee04f83d8814f567e01a4e/notebook/services/contents/filecheckpoints.py
     """
 
     fs = Instance(FS)
 
     @default('fs')
     def _fs_default(self):
-        instance = FilesystemHandle.instance(
+        instance = FilesystemHandle(
             self.fs_url, create=self.create, writeable=self.writeable,
             closeonexit=self.closeonexit, keepalive=self.keepalive)
         assert instance.fs_url == self.fs_url
@@ -188,6 +177,10 @@ class FsManagerMixin(HasTraits):
         for remote filesystems''',
         config=True,
     )
+
+    @default('checkpoints_class')
+    def _checkpoints_class_default(self):
+        return FsCheckpoints
 
     # https://github.com/quantopian/pgcontents/blob/5fad3f6840d82e6acde97f8e3abe835765fa824b/pgcontents/pgmanager.py#L115
     def guess_type(self, path, allow_directory=True):
@@ -407,12 +400,7 @@ class FsManagerMixin(HasTraits):
     #     self.conn.c.sf.keepAlive(None)
 
 
-class FsContentsManager(FsManagerMixin, ContentsManager):
-    pass
-
-
-class FsCheckpoints(
-        FsManagerMixin, GenericCheckpointsMixin, Checkpoints):
+class FsCheckpoints(GenericCheckpointsMixin, Checkpoints):
 
     checkpoint_dir = Unicode(
         '.ipynb_checkpoints',
@@ -432,7 +420,7 @@ class FsCheckpoints(
 
     def _checkpoint_path(self, checkpoint_id, path):
         """find the path to a checkpoint"""
-        path = self.fs.validatepath(path)
+        path = self.parent.fs.validatepath(path)
         parent, name = fspath.split(path)
         basename, ext = fspath.splitext(name)
         cp_path = fspath.join(
@@ -451,9 +439,8 @@ class FsCheckpoints(
 
     def _ensure_checkpoint_dir(self, cp_path):
         dirname, basename = fspath.split(cp_path)
-        self.log.debug('%s %s %s', dirname, self.dir_exists(dirname), basename)
-        if not self.dir_exists(dirname):
-            self._save_directory(dirname, None)
+        if not self.parent.dir_exists(dirname):
+            self.parent._save_directory(dirname, None)
 
     def create_file_checkpoint(self, content, format, path):
         self.log.debug('create_file_checkpoint(%s)', path)
@@ -462,7 +449,7 @@ class FsCheckpoints(
         model = _base_model(*fspath.split(cp_path))
         model['content'] = content
         model['format'] = format
-        f = self._save_file(cp_path, model)
+        f = self.parent._save_file(cp_path, model)
         return self._checkpoint_model(0, f)
 
     def create_notebook_checkpoint(self, nb, path):
@@ -471,31 +458,31 @@ class FsCheckpoints(
         self._ensure_checkpoint_dir(cp_path)
         model = _base_model(*fspath.split(cp_path))
         model['content'] = nb
-        f = self._save_notebook(cp_path, model, False)
+        f = self.parent._save_notebook(cp_path, model, False)
         return self._checkpoint_model(0, f)
 
     def get_file_checkpoint(self, checkpoint_id, path):
         # -> {'type': 'file', 'content': <str>, 'format': {'text', 'base64'}}
         self.log.debug('get_file_checkpoint(%s %s)', checkpoint_id, path)
         cp_path = self._checkpoint_path(checkpoint_id, path)
-        return self._get_file(cp_path, True, None)
+        return self.parent._get_file(cp_path, True, None)
 
     def get_notebook_checkpoint(self, checkpoint_id, path):
         # -> {'type': 'notebook', 'content': <output of nbformat.read>}
         self.log.debug('get_notebook_checkpoint(%s %s)', checkpoint_id, path)
         cp_path = self._checkpoint_path(checkpoint_id, path)
-        return self._get_notebook(cp_path, True, 'text', trust=False)
+        return self.parent._get_notebook(cp_path, True, 'text', trust=False)
 
     def delete_checkpoint(self, checkpoint_id, path):
         self.log.debug('delete_checkpoint(%s %s)', checkpoint_id, path)
         cp_path = self._checkpoint_path(checkpoint_id, path)
-        self.delete_file(cp_path)
+        self.parent.delete_file(cp_path)
 
     def list_checkpoints(self, path):
         self.log.debug('list_checkpoints(%s)', path)
         cp_path = self._checkpoint_path(0, path)
-        if self.file_exists(cp_path):
-            f = self._get_file(cp_path, False, None)
+        if self.parent.file_exists(cp_path):
+            f = self.parent._get_file(cp_path, False, None)
             return [self._checkpoint_model(0, f)]
         return []
 
@@ -505,4 +492,4 @@ class FsCheckpoints(
         cp_path_old = self._checkpoint_path(checkpoint_id, old_path)
         cp_path_new = self._checkpoint_path(checkpoint_id, new_path)
         self._ensure_checkpoint_dir(cp_path_new)
-        self.rename_file(cp_path_old, cp_path_new)
+        self.parent.rename_file(cp_path_old, cp_path_new)

@@ -2,7 +2,8 @@
 [![Build Status](https://travis-ci.com/manics/jupyter-pyfilesystem.svg?branch=master)](https://travis-ci.com/manics/jupyter-pyfilesystem)
 [![PyPI](https://img.shields.io/pypi/v/jupyter-pyfilesystem)](https://pypi.org/project/jupyter-pyfilesystem/)
 
-A [Jupyter Notebooks ContentsManager](https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html#writing-a-custom-contentsmanager) that uses [PyFilesystem](https://www.pyfilesystem.org/) for storing files.
+A [Jupyter Notebooks `ContentsManager`](https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html#writing-a-custom-contentsmanager) that uses [PyFilesystem](https://www.pyfilesystem.org/) for storing files.
+Includes a compatible [`Checkpoints`](https://jupyter-notebook.readthedocs.io/en/stable/extending/contents.html#customizing-checkpoints) class.
 
 
 ## Installation
@@ -17,11 +18,9 @@ pip install jupyter-pyfilesystem
 `jupyter_notebook_config.py`:
 ```python
 c.NotebookApp.contents_manager_class = 'jupyter_pyfilesystem.FsContentsManager'
-c.ContentsManager.checkpoints_class = 'jupyter_pyfilesystem.FsCheckpoints'
 
 # In-memory temporary filesystem
-fs_url = 'mem://'
-c.FsContentsManager.fs_url = c.FsCheckpoints.fs_url = fs_url
+c.FsContentsManager.fs_url = 'mem://'
 ```
 
 See https://docs.pyfilesystem.org/en/latest/openers.html for information on how to define `fs_url`, and https://docs.pyfilesystem.org/en/latest/builtin.html for a list of built-in filesystems.
@@ -34,19 +33,18 @@ You can only create/overwrite an existing file, or open a file read-only.
 
 For example:
 ```python
-fs_url = 'zip:///tmp/test.zip'
-c.FsContentsManager.fs_url = c.FsCheckpoints.fs_url = fs_url
+c.FsContentsManager.fs_url = 'zip:///tmp/test.zip'
 
 import os
 if os.path.exists(fs_url[6:]):
-    c.FsContentsManager.create = c.FsCheckpoints.create = False
-    c.FsContentsManager.writeable = c.FsCheckpoints.writeable = False
+    c.FsContentsManager.create = False
+    c.FsContentsManager.writeable = False
 ```
 
-If you are using a remote filesystem you may want to enable the keepalive.
+If you are using a remote filesystem you may want to enable the `keepalive`.
 For example, this will make a remote request to get the details of `/` every 60 seconds:
 ```python
-c.FsContentsManager.keepalive = c.FsCheckpoints.keepalive = 60
+c.FsContentsManager.keepalive = 60
 ```
 
 ## Acknowledgements

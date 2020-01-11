@@ -19,10 +19,7 @@ Run IPython's TestContentsManager using PostgresContentsManager.
 from itertools import combinations
 
 from fs import open_fs
-from jupyter_pyfilesystem import (
-    FsContentsManager,
-    FsCheckpoints,
-)
+from jupyter_pyfilesystem import FsContentsManager
 from .utils import (
     assertRaisesHTTPError,
     _norm_unicode,
@@ -44,12 +41,7 @@ class FSManagerTestCase(TestContentsManager):
     def setUp(self):
         fs = open_fs(TEST_FS_URL)
         self.contents_manager = FsContentsManager()
-        # self.contents_manager.fs_url = TEST_FS_URL
         self.contents_manager.fs = fs
-        self.contents_manager.checkpoints = FsCheckpoints()
-        # self.contents_manager.checkpoints.fs_url = TEST_FS_URL
-        self.contents_manager.checkpoints.fs = fs
-        # self.addCleanup(self.contents_manager.engine.dispose)
 
     def tearDown(self):
         print(self.contents_manager.fs)
