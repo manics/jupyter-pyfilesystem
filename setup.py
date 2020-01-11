@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
     name='jupyter-pyfilesystem',
-    version='0.0.4',
+    version='0.0.5',
     url='https://github.com/manics/jupyter-pyfilesystem',
     author='Simon Li',
     license='MIT',
